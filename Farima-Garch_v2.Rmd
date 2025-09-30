@@ -1,0 +1,310 @@
+---
+title: "FARIMA-GARCH"
+author: "DEBA"
+date: "12/22/2024"
+output: html_document
+---
+
+```{r}
+library(arfima) 
+library(quantmod)
+library(forecast)
+library(rugarch)
+library(tseries)
+library(openxlsx)
+library(xts)
+```
+
+# Estimation d'un modèle FARIMA-GARCH 
+
+```{r}
+# Étape 1 : Chargement des données et calcul des rendements
+getSymbols("ADBE", from = "2010-01-01", to = "2024-10-31", src = "yahoo")
+adobe_prices <- ADBE$ADBE.Adjusted
+adobe_returns <- na.omit(diff(log(adobe_prices)))
+```
+## Étape 2 : Analyse graphique
+
+```{r}
+# Étape 2 : Analyse graphique
+
+par(mfrow = c(2, 2))
+
+plot(adobe_returns, main = "Rendements Logarithmiques d'Adobe", ylab = "Rendements", col = "blue")
+
+acf(adobe_returns, main = "ACF des rendements")
+pacf(adobe_returns, main = "PACF des rendements")
+
+acf(adobe_returns**2, lag.max = 80, main = "ACF des carrés des rendements")
+
+# Test de stationnarité avec ADF
+adf_test <- adf.test(adobe_returns)
+print(adf_test)
+```
+
+L'autocorrélogramme des rendements indique cette chronique est stationnaire, ce qui est confirmé par le test ADF (p.value <0.05).
+L'autocorrélogramme du carré des rendements semble indiquer la persistence des corrélations. Cela motive l'estimation d'un modèle FARIMA.
+L'orde maximal ar est 5 et l'ordre maximal ma est 2.
+
+## Étape 3 : Grid search pour le modèle FARIMA avec arfima
+
+```{r}
+# Définir la fonction de recherche de modèle optimal
+grid_search_farima <- function(data, max_pq_farima = 3, max_pq_garch = 3) {
+  # Initialiser un dataframe pour stocker les r�sultats
+  results <- data.frame(
+    p_farima = integer(),
+    q_farima = integer(),
+    p_garch = integer(),
+    q_garch = integer(),
+    aic = numeric(),
+    Box_Pierce.pval = numeric(),
+    stringsAsFactors = FALSE
+  )
+
+  # Boucle pour p et q de FARIMA
+  for (p_farima in 1:max_pq_farima) {
+    for (q_farima in 1:max_pq_farima) {
+      # Boucle pour p et q de GARCH
+      for (p_garch in 1:max_pq_garch) {
+        for (q_garch in 1:max_pq_garch) {
+          # Sp�cification du mod�le
+          spec <- ugarchspec(
+            variance.model = list(model = "sGARCH", garchOrder = c(p_garch, q_garch)),
+            mean.model = list(armaOrder = c(p_farima, q_farima), include.mean = TRUE, arfima = TRUE),
+            distribution.model = "norm"  # Distribution normale
+          )
+
+          # Essayer d�ajuster le mod�le et capturer les erreurs
+          fit <- tryCatch({
+            ugarchfit(spec = spec, data = data)
+          }, error = function(e) NULL)
+
+          # Si l�ajustement est valide, calculer l�AIC et ajouter au dataframe
+          if (!is.null(fit)) {
+            aic <- (-2*fit@fit[["LLH"]]) + 2*(length(coef(fit))-1)  # Extraire AIC
+            
+            # V�rification des r�sidus
+            residuals <- residuals(fit)
+            Box_Pierce.pval <- tryCatch({
+              Box.test(residuals, type = "Ljung-Box")$p.value
+          }, error = function(e) NULL)
+          
+            if((length(aic) != 0)&(length(Box_Pierce.pval) != 0)){
+              
+                results <- rbind(results, data.frame(
+                p_farima = p_farima,
+                q_farima = q_farima,
+                p_garch = p_garch,
+                q_garch = q_garch,
+                aic = aic,
+                Box_Pierce.pval = Box_Pierce.pval
+                
+              ))
+              
+           
+            }
+          }
+        }
+      }
+    }
+  }
+
+  # Trier les r�sultats par AIC
+  results <- results[order(results$aic), ]
+
+  # Retourner le dataframe tri�
+  return(results)
+}
+
+
+```
+
+
+```{r}
+# Recherche des modèles
+#mean_return <- mean(adobe_returns)
+farima_results <- grid_search_farima(adobe_returns)
+```
+
+
+```{r}
+farima_results$parcimony <- farima_results$p_farima + farima_results$q_farima + farima_results$p_garch + farima_results$q_garch
+farima_results <- farima_results[order(farima_results$aic, farima_results$parcimony),]
+# Affichage des meilleurs résultats
+head(farima_results,80)
+```
+Le modèle optimal obtenu est un FARIMA(3,d,2) avec d=-0.0277 < 0, ce qui met en doute la persistence d'une mémoire longue et contrarie un ajustement FARIMA faible. Toutefois, d n'est pas significativement différent de 0, donnant ainsi la possibilité de s'orienter vers un modèle ARIMA(3,0,2).
+
+
+
+
+```{r}
+#mean_sq_return <- mean(adobe_returns**2)
+farima_results_sq <- grid_search_farima(adobe_returns**2)
+```
+
+```{r}
+farima_results_sq$parcimony <- farima_results_sq$p_farima + farima_results_sq$q_farima + farima_results_sq$p_garch + farima_results_sq$q_garch
+farima_results_sq <- farima_results_sq[order(farima_results_sq$aic, farima_results_sq$parcimony),]
+# Affichage des meilleurs résultats
+head(farima_results_sq,10)
+```
+
+
+
+
+
+
+
+
+
+## Étape 4 : Sélection du meilleur modèle et vérification des diagnostics
+```{r}
+# Définir la spécification du modèle ARFIMA + GARCH
+spec_1 <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),  # GARCH(1,1)
+  mean.model = list(armaOrder = c(3, 3), include.mean = TRUE, archm = FALSE, arfima = TRUE),  # FARIMA(3,d,3)
+  distribution.model = "norm"  # Distribution normale
+)
+
+spec_2 <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(2, 1)),  # GARCH(1,1)
+  mean.model = list(armaOrder = c(3, 1), include.mean = TRUE, archm = FALSE, arfima = TRUE),  # FARIMA(3,d,3)
+  distribution.model = "norm"  # Distribution normale
+)
+
+# Ajuster le modèle sur les données
+best_model_1 <- ugarchfit(spec = spec_1, data = adobe_returns)
+#best_model_2 <- ugarchfit(spec = spec_2, data = adobe_returns)
+```
+
+
+
+
+```{r}
+# Vérification des résidus
+best_residuals_1 <- residuals(best_model_1)
+best_residuals_2 <- residuals(best_model_2)
+
+# Vérification des résidus standadisé
+std_best_residuals_1 <- residuals(best_model_1, standardize=TRUE)
+std_best_residuals_2 <- residuals(best_model_2, standardize=TRUE)
+
+# Volatilité
+volatility_daily_1 <- sigma(best_model_1)
+volatility_daily_2 <- sigma(best_model_2)
+
+png("farima33_garch11_plots.png", width = 1200, height = 800)
+# FARIMA(3,d,3)-GARCH(1,1)
+par(mfrow = c(3, 2),mar = c(6, 5, 5, 3))
+acf(adobe_returns^2, main="(a) ACF ot the squared returns")
+plot(best_residuals_1, main="(b) Estimated innovations of returns\n FARIMA(3,d,3)-GARCH(1,1)")
+
+plot(volatility_daily_1, main="(c) Estimated conditionnal standard deviation\n FARIMA(3,d,3)-GARCH(1,1)")
+plot(std_best_residuals_1, main="(d) Standardized innovations\n FARIMA(3,d,3)-GARCH(1,1)")
+
+acf(best_residuals_1^2, main = "(e) ACF of the squared innovations\n FARIMA(3,d,3)-GARCH(1,1)")
+acf(std_best_residuals_1^2, main = "(f) ACF of the squared satandardized\n innovations FARIMA(3,d,3)-GARCH(1,1)")
+
+
+
+
+
+dev.off()
+
+png("farima32_garch21_plots.png", width = 1200, height = 800)
+# FARIMA(3,d,1)-GARCH(2,1)
+par(mfrow = c(3, 2),mar = c(6, 5, 5, 3))
+acf(adobe_returns^2, main="(a) ACF ot the squared returns")
+plot(best_residuals_2, main="(b) Estimated innovations of returns\n FARIMA(3,d,1)-GARCH(2,1)")
+
+plot(volatility_daily_2, main="(c) Estimated conditionnal standard deviation\n FARIMA(3,d,1)-GARCH(2,1)")
+plot(std_best_residuals_2, main="(d) Standardized innovations\n FARIMA(3,d,1)-GARCH(2,1)")
+
+
+acf(best_residuals_2^2, main = "(e) ACF of the squared innovations\n FARIMA(3,d,1)-GARCH(2,1)")
+acf(std_best_residuals_2^2, main = "(f) ACF of the squared satandardized\n innovations FARIMA(3,d,1)-GARCH(2,1)")
+
+dev.off()
+```
+
+
+
+```{r}
+# Étape 7 : Extraire la volatilité conditionnelle journalière
+sigma<- sigma(best_model)
+
+# Vérification que les longueurs des données concordent
+if (length(sigma) == nrow(adobe_returns)) {
+  adobe_returns$sigma <- xts(volatility_daily, order.by = index(adobe_returns))
+} else {
+  stop("Les longueurs des séries de volatilité et des rendements ne correspondent pas.")
+}
+```
+
+
+##Squared returns
+
+```{r}
+# Définir la spécification du modèle ARFIMA + GARCH
+spec <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(2, 3)),  # GARCH(2,3)
+  mean.model = list(armaOrder = c(3, 1), include.mean = TRUE, archm = FALSE, arfima = TRUE),  # FARIMA(3,d,1)
+  distribution.model = "norm"  # Distribution normale
+)
+
+# Ajuster le modèle sur les données
+best_model_sq <- ugarchfit(spec = spec, data = adobe_returns^2)
+
+# Résultats de l'ajustement
+best_model_sq
+```
+
+```{r}
+# Vérification des résidus
+best_residuals_sq <- residuals(best_model_sq)
+
+
+# Vérification des résidus standadisé
+std_best_residuals_sq <- residuals(best_model_sq, standardize=TRUE)
+
+# Volatilité
+volatility_daily_sq <- sigma(best_model_sq)
+
+
+png("farima31_garch23_plots.png", width = 1200, height = 800)
+# FARIMA(3,d,1)-GARCH(2,3)
+par(mfrow = c(3, 2),mar = c(6, 5, 5, 3))
+acf(adobe_returns^4, main="(a) ACF ot the squared squared-returns")
+plot(best_residuals_sq, main="(b) Estimated innovations of squared-returns\n FARIMA(3,d,1)-GARCH(2,3)")
+
+plot(volatility_daily_sq, main="(c) Estimated conditionnal standard deviation\n FARIMA(3,d,1)-GARCH(2,3)")
+plot(std_best_residuals_sq, main="(d) Standardized innovations\n FARIMA(3,d,1)-GARCH(2,3)")
+
+acf(best_residuals_sq^2, main = "(e) ACF of the squared innovations\n FARIMA(3,d,1)-GARCH(2,3)")
+acf(std_best_residuals_sq^2, main = "(f) ACF of the squared satandardized\n innovations FARIMA(3,d,1)-GARCH(2,3)")
+
+
+
+
+
+dev.off()
+
+```
+
+
+```{r}
+chart_Series(adobe_returns$Volatility)
+chart_Series(adobe_returns$ADBE.Adjusted)
+
+
+# Exporter en CSV avec les dates et la volatilité
+# write.csv(data.frame(Date = index(adobe_returns), coredata(adobe_returns)), "volatilite_estimee.csv", row.names = FALSE)
+
+
+```
+
+
+
+

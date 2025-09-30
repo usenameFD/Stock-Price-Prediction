@@ -1,0 +1,543 @@
+---
+title: "Stock Niyo"
+author: "Niyo D. JC"
+date: "2024-12-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Dépendances
+
+```{r}
+library(quantmod)
+library(TTR)
+library(lubridate)
+library(dplyr) 
+
+library(zoo) # Pour imputation
+library(TSA)
+library(extRemes)
+library(tseries)
+```
+
+```{r}
+data <- getSymbols("ADBE",env=NULL, from="2010-01-01", to = "2024-10-31")
+```
+
+```{r}
+create_stock_dataframe <- function(dta, sp500_symbol = "^GSPC", cac40_symbol = "^FCHI") {
+  
+  colnames(dta) <- c("Open", "High", "Low", "Close", "Volume", "Adjusted")
+  
+  # Calcul des indicateurs techniques
+  MAV5Day <- SMA(dta$Volume, n = 5) # Moyenne mobile 5 jours
+  RSI3Day <- RSI(Cl(dta), n = 3) # RSI 3 jours (Relative Strength Index)
+  RSI9Day <- RSI(Cl(dta), n = 9) # RSI 9 jours
+  RSI14Day <- RSI(Cl(dta), n = 14) # RSI 14 jours
+  RSI30Day <- RSI(Cl(dta), n = 30) # RSI 30 jours
+  MA10Day <- SMA(Cl(dta), n = 10) # Moyenne mobile 10 jours
+  MA30Day <- SMA(Cl(dta), n = 30) # Moyenne mobile 30 jours
+  MA50Day <- SMA(Cl(dta), n = 50) # Moyenne mobile 50 jours
+  EMA10Day <- EMA(Cl(dta), n = 10) # Moyenne mobile exponentielle 10 jours
+  
+  # Variation de prix (absolue et relative)
+  PriceChange <- diff(Cl(dta), lag = 1) # Variation absolue
+
+  # Différence entre prix de clôture et d'ouverture
+  CloseOpenDiff <- Cl(dta) - Op(dta)
+  
+  # Différence entre High et Low
+  HighLowDiff <- Hi(dta) - Lo(dta)
+  
+  # Convergence/Divergence des Moyennes Mobiles (MACD)
+  MACD <- MACD(Cl(dta), nFast = 12, nSlow = 26, nSig = 9) # Valeurs Fast, Slow, Signal
+  
+  # Volume On-Balance (OBV)
+  OBV <- OBV(Cl(dta), dta$Volume)
+  
+  # Ratio de Volume (Volume Ratio - VR)
+  UpVolume <- ifelse(PriceChange > 0, dta$Volume, 0) # Volume des jours à hausse
+  DownVolume <- ifelse(PriceChange < 0, dta$Volume, 0) # Volume des jours à baisse
+  VR <- SMA(UpVolume, n = 14) / SMA(DownVolume, n = 14) # Ratio glissant sur 14 jours
+  
+  # Construction du DataFrame
+  df <- data.frame(
+    Date = index(dta),
+    Open = coredata(dta$Open),
+    High = coredata(dta$High),
+    Low = coredata(dta$Low),
+    Close = coredata(dta$Close),
+    Volume = coredata(dta$Volume),
+    MAV5Day = coredata(MAV5Day),
+    RSI3Day = coredata(RSI3Day),
+    RSI9Day = coredata(RSI9Day),
+    RSI14Day = coredata(RSI14Day),
+    RSI30Day = coredata(RSI30Day),
+    MA10Day = coredata(MA10Day),
+    MA30Day = coredata(MA30Day),
+    MA50Day = coredata(MA50Day),
+    EMA10Day = coredata(EMA10Day),
+    CloseOpenDiff = coredata(CloseOpenDiff),
+    HighLowDiff = coredata(HighLowDiff),
+    MACD = coredata(MACD$macd),
+    Signal = coredata(MACD$signal),
+    OBV = coredata(OBV),
+    VR = coredata(VR)
+  )
+  
+   # Récupération des données des indices
+  sp500_data <- getSymbols(sp500_symbol, env = NULL, from = min(df$Date), to = max(df$Date), auto.assign = FALSE)
+  cac40_data <- getSymbols(cac40_symbol, env = NULL, from = min(df$Date), to = max(df$Date), auto.assign = FALSE)
+  
+  # Extraction des prix de clôture et transformation en DataFrame
+  sp500_close <- data.frame(Date = index(sp500_data), SP_Close = coredata(Cl(sp500_data)))
+  cac40_close <- data.frame(Date = index(cac40_data), CAC_Close = coredata(Cl(cac40_data)))
+  
+  # Jointures avec le DataFrame principal sur la colonne "Date"
+  df <- left_join(df, sp500_close, by = "Date")
+  df <- left_join(df, cac40_close, by = "Date")
+  
+  return(df)
+}
+
+```
+
+```{r}
+df_stock <- create_stock_dataframe(data)
+df_stock$Date <- as.Date(df_stock$Date, format = "%Y-%m-%d")
+df_stock$Quarter <- paste0("Q", month(df_stock$Date), "-", year(df_stock$Date))
+```
+
+```{r}
+macro_sentiment <- read.csv(file.choose())
+macro_sentiment$DATE <- as.Date(macro_sentiment$DATE, format = "%Y-%m-%d")
+macro_sentiment$Quarter <- paste0("Q", month(macro_sentiment$DATE), "-", year(macro_sentiment$DATE))
+```
+
+```{r}
+combined_df <- merge(df_stock, macro_sentiment, by = "Quarter", all.x = TRUE)
+combined_df <- combined_df[, !(colnames(combined_df) %in% c("Quarter", "DATE"))]
+combined_df$Date <- as.Date(combined_df$Date)
+combined_df <- combined_df[order(combined_df$Date), ]
+```
+
+```{r}
+data <- read.csv(file.choose())
+data$Date <- as.Date(data$Date)
+data <- data[, c("Date", "Sigma", "Sigma2")]
+combined_df <- merge(combined_df, data, by = "Date", all.x = TRUE)
+```
+
+```{r}
+combined_df$sovereign_debt_crisis <- as.integer(combined_df$Date >= as.Date("2010-01-01") & combined_df$Date <= as.Date("2012-12-31"))
+combined_df$oil_shock <- as.integer(combined_df$Date >= as.Date("2014-01-01") & combined_df$Date <= as.Date("2016-12-31"))
+combined_df$trade_war <- as.integer(combined_df$Date >= as.Date("2018-01-01") & combined_df$Date <= as.Date("2019-12-31"))
+combined_df$covid_pandemic <- as.integer(combined_df$Date >= as.Date("2020-01-01") & combined_df$Date <= as.Date("2022-12-31"))
+combined_df$war_ukraine <- as.integer(combined_df$Date >= as.Date("2022-02-24"))
+```
+
+```{r}
+# Imputation des valeurs manquantes dans GSPC.Close et FCHI.Close avec la valeur précédente
+combined_df <- na.locf(combined_df, na.rm = FALSE)
+
+missing_GSPC_after <- sum(is.na(combined_df$GSPC.Close))
+missing_FCHI_after <- sum(is.na(combined_df$FCHI.Close))
+
+cat("Nombre de valeurs manquantes dans GSPC.Close après imputation : ", missing_GSPC_after, "\n")
+cat("Nombre de valeurs manquantes dans FCHI.Close après imputation : ", missing_FCHI_after, "\n")
+```
+
+### Prix de cloture
+
+```{r}
+combined_df$Rend <- Delt(combined_df$Close, k = 1, type = 'log')
+summary(combined_df$Close)
+```
+
+```{r}
+sd(na.omit(combined_df$Close))
+```
+
+```{r}
+adobe_ts <- ts(na.omit(combined_df$Close), frequency = 252) # 252 pour les jours de trading annuels
+decomp <- decompose(adobe_ts)
+plot(decomp)
+```
+
+```{r}
+combined_df$Rend <- Delt(combined_df$Close, k = 1, type = 'log')
+```
+
+```{r}
+adobe_ts <- ts(na.omit(combined_df$Rend), frequency = 252) # 252 pour les jours de trading annuels
+decomp <- decompose(adobe_ts)
+plot(decomp)
+```
+
+```{r}
+(adf_test <- adf.test(na.omit(combined_df$Rend), alternative = "stationary", k = 0))
+```
+
+```{r}
+ret <- na.omit(combined_df$Rend)**2
+stats::acf(ret)
+```
+
+```{r}
+summary(combined_df$Rend)
+```
+
+### Analyse des covariables
+
+```{r}
+library(quantmod)
+library(dplyr)
+library(corrplot)
+```
+
+```{r}
+# Créer un tableau contenant moyenne, min, max et écart-type
+summary_with_sd <- data.frame(
+  Moyenne = sapply(combined_df, function(x) if(is.numeric(x)) mean(x, na.rm = TRUE) else NA),
+  Min = sapply(combined_df, function(x) if(is.numeric(x)) min(x, na.rm = TRUE) else NA),
+  Max = sapply(combined_df, function(x) if(is.numeric(x)) max(x, na.rm = TRUE) else NA),
+  ÉcartType = sapply(combined_df, function(x) if(is.numeric(x)) sd(x, na.rm = TRUE) else NA)
+)
+
+print(summary_with_sd)
+```
+
+```{r}
+# Matrice de corrélation
+cor_matrix <- cor(combined_df[, -1], use = "pairwise.complete.obs")
+
+# Afficher la matrice sous forme graphique
+corrplot(cor_matrix, method = "color", type = "upper", tl.col = "black", tl.cex = 0.8)
+```
+
+```{r}
+# Tracer les relations entre Close et d'autres indicateurs
+plot(combined_df$EMVMACROBUS, combined_df$MA10Day, main = "Close vs MA10Day", xlab = "Close", ylab = "MA10Day")
+plot(combined_df$EMVMACROBUS, combined_df$RSI14Day, main = "Close vs RSI14Day", xlab = "Close", ylab = "RSI14Day")
+
+# Exemple de graphique temporel
+plot(combined_df$Date, combined_df$Close, type = "l", main = "Prix de Clôture dans le Temps", xlab = "Date", ylab = "Close")
+lines(combined_df$Date, combined_df$SMA.4, col = "blue", lwd = 2)
+```
+
+```{r}
+par(mfrow = c(2, 2))
+spec.pgram(na.omit(combined_df$Rend), log = "no", main = "Spectrum of Return")
+spec.pgram(na.omit(combined_df$SMA.4), log = "no", main = "Spectrum of the SMA Variable")
+spec.pgram(na.omit(combined_df$signal), log = "no", main = "Spectrum of the Signal Variable")
+spec.pgram(na.omit(combined_df$LNS12032195), log = "no", main = "Spectrum of the LNS12032195 Variable")
+```
+
+```{r}
+
+```
+
+### Prophet
+
+```{r}
+library(prophet)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r}
+# Préparation des données
+data.prohet <- combined_df %>% select(Date, Close, Volume, SMA, rsi, rsi.1, rsi.2, rsi.3, SMA.1, SMA.2, SMA.3, EMA, 
+                     Close.1, High.1, macd, signal, obv, SMA.4, GSPC.Close, FCHI.Close, 
+                     EMVMACROBUS, CPIAUCSL, EXPINF1YR, LNS12032195, UMCSENT, Sigma, Sigma2, sovereign_debt_crisis, oil_shock, trade_war, covid_pandemic, war_ukraine)%>%
+  na.omit()  # Avec les calculs mobiles, certaines variables sont vides
+
+# Renommer pour Prophet
+colnames(data.prohet)[1] <- "ds"
+colnames(data.prohet)[2] <- "y"
+
+# Séparation des données en train et test
+train_end_date <- as.Date("2024-01-01")
+train_data <- data.prohet %>% filter(ds <= train_end_date)
+test_data <- data.prohet %>% filter(ds > train_end_date)
+
+# Création et ajustement du modèle Prophet
+model <- prophet()
+model <- add_regressor(model, 'Volume')
+model <- add_regressor(model, 'SMA')
+model <- add_regressor(model, 'rsi')
+model <- add_regressor(model, 'rsi.1')
+model <- add_regressor(model, 'rsi.2')
+model <- add_regressor(model, 'rsi.3')
+model <- add_regressor(model, 'SMA.1')
+model <- add_regressor(model, 'SMA.2')
+model <- add_regressor(model, 'SMA.3')
+model <- add_regressor(model, 'EMA')
+model <- add_regressor(model, 'Close.1')
+model <- add_regressor(model, 'High.1')
+model <- add_regressor(model, 'macd')
+model <- add_regressor(model, 'signal')
+model <- add_regressor(model, 'obv')
+model <- add_regressor(model, 'SMA.4')
+model <- add_regressor(model, 'GSPC.Close')
+model <- add_regressor(model, 'FCHI.Close')
+model <- add_regressor(model, 'EMVMACROBUS')
+model <- add_regressor(model, 'CPIAUCSL')
+model <- add_regressor(model, 'EXPINF1YR')
+model <- add_regressor(model, 'LNS12032195')
+model <- add_regressor(model, 'UMCSENT')
+model <- add_regressor(model, 'Sigma')
+model <- add_regressor(model, 'Sigma2')
+model <- add_regressor(model, 'sovereign_debt_crisis')
+model <- add_regressor(model, 'oil_shock')
+model <- add_regressor(model, 'trade_war')
+model <- add_regressor(model, 'covid_pandemic')
+model <- add_regressor(model, 'war_ukraine')
+```
+
+```{r}
+model <- fit.prophet(model, train_data)
+```
+
+```{r}
+# Préparation des prédictions
+future <- data.frame(ds = seq.Date(from = min(test_data$ds), to = max(test_data$ds), by = "day"))
+future <- left_join(future, data.prohet, by = 'ds') %>% na.omit()
+forecast <- predict(model, future)
+```
+
+```{r}
+# Affichage des résultats
+plot(model, forecast)
+prophet_plot_components(model, forecast)
+```
+
+```{r}
+# Évaluation des erreurs
+forecast_test <- forecast %>% filter(ds > train_end_date)
+test_data <- test_data %>% select(ds, y)
+
+results <- left_join(forecast_test %>% select(ds, yhat), test_data, by = 'ds')
+
+# Calcul des erreurs
+rmse <- sqrt(mean((results$yhat - results$y)^2, na.rm = TRUE))
+mae <- mean(abs(results$yhat - results$y), na.rm = TRUE)
+mape <- mean(abs((results$yhat - results$y) / results$y), na.rm = TRUE) * 100
+
+cat("RMSE:", rmse, "\n")
+cat("MAE:", mae, "\n")
+cat("MAPE:", mape, "%\n")
+```
+
+```{r}
+rmse <- function(actual, predicted) {
+  sqrt(mean((actual - predicted)^2, na.rm = TRUE))
+}
+```
+
+```{r}
+
+variable_contribution <- function(model, data, test_data, train_end_date, n_permutations = 10) {
+
+  # Prédiction de base (toutes les variables)
+  future <- data.frame(ds = seq.Date(from = min(test_data$ds), to = max(test_data$ds), by = "day"))
+  future <- left_join(future, data, by = 'ds') %>% na.omit()
+  full_forecast <- predict(model, future)
+  base_rmse <- rmse(test_data$y, full_forecast$yhat)
+
+  # Initialiser les contributions moyennes
+  contributions <- list()
+
+  for (var in colnames(data)[3:ncol(data)]) {  # Ignorer ds et y
+    permuted_rmse_list <- c()
+
+    for (i in 1:n_permutations) {
+      # Permutation de la variable
+      permuted_data <- future
+      permuted_data[[var]] <- sample(permuted_data[[var]])
+
+      # Prédiction avec la variable permutée
+      permuted_forecast <- predict(model, permuted_data)
+      permuted_rmse <- rmse(test_data$y, permuted_forecast$yhat)
+
+      # Stocker la différence de RMSE
+      permuted_rmse_list <- c(permuted_rmse_list, permuted_rmse - base_rmse)
+    }
+
+    # Moyenne des contributions
+    contributions[[var]] <- mean(permuted_rmse_list)
+  }
+
+  # Retourner les contributions moyennes
+  contributions_df <- data.frame(
+    Variable = names(contributions),
+    Contribution = unlist(contributions)
+  ) %>% arrange(desc(Contribution))
+
+  return(contributions_df)
+}
+
+```
+
+```{r}
+# Utilisation de la fonction
+contributions <- variable_contribution(model, data.prohet, test_data, train_end_date)
+print(contributions)
+```
+
+```{r}
+# Graphique des contributions
+plot_contributions <- function(contributions_df) {
+  ggplot(contributions_df, aes(x = reorder(Variable, Contribution), y = Contribution, fill = Contribution)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    scale_fill_gradient(low = "blue", high = "red") +
+    labs(title = "Contribution des variables dans le modèle Prophet",
+         x = "Variable",
+         y = "Contribution (Différence de RMSE)") +
+    theme_minimal()
+}
+
+# Affichage du graphique
+plot_contributions(contributions)
+```
+
+### Garch-Farima
+
+```{r}
+Rend <- na.omit(combined_df$Rend)  
+```
+
+```{r}
+grid_search <- function(data, max_pq_farima = 3, max_pq_garch = 3) {
+  # Initialiser un dataframe pour stocker les résultats
+  results <- data.frame(
+    p_farima = integer(),
+    q_farima = integer(),
+    p_garch = integer(),
+    q_garch = integer(),
+    aic = numeric(),
+    stringsAsFactors = FALSE
+  )
+
+  # Boucle pour p et q de FARIMA
+  for (p_farima in 1:max_pq_farima) {
+    for (q_farima in 1:max_pq_farima) {
+      # Boucle pour p et q de GARCH
+      for (p_garch in 1:max_pq_garch) {
+        for (q_garch in 1:max_pq_garch) {
+          # Spécification du modèle
+          spec <- ugarchspec(
+            variance.model = list(model = "sGARCH", garchOrder = c(p_garch, q_garch)),
+            mean.model = list(armaOrder = c(p_farima, q_farima), include.mean = TRUE, arfima = TRUE),
+            distribution.model = "norm"  # Distribution normale
+          )
+
+          # Essayer d’ajuster le modèle et capturer les erreurs
+          fit <- tryCatch({
+            ugarchfit(spec = spec, data = data)
+          }, error = function(e) NULL)
+
+          # Si l’ajustement est valide, calculer l’AIC et ajouter au dataframe
+          if (!is.null(fit)) {
+            aic <- (-2*fit@fit[["LLH"]]) + 2*(length(coef(fit))-1)  # Extraire AIC
+            if(length(aic) != 0){
+              results <- rbind(results, data.frame(
+              p_farima = p_farima,
+              q_farima = q_farima,
+              p_garch = p_garch,
+              q_garch = q_garch,
+              aic = aic
+            ))
+            }
+          }
+        }
+      }
+    }
+  }
+
+  # Trier les résultats par AIC
+  results <- results[order(results$aic), ]
+
+  # Retourner le dataframe trié
+  return(results)
+}
+```
+
+```{r}
+# Exécuter la recherche (Attention ça dure)
+results <- grid_search(data = Rend, max_pq_farima = 3, max_pq_garch = 3)
+```
+
+```{r}
+# Définir la spécification du modèle ARFIMA + GARCH
+spec <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(2, 1)),  # GARCH(2,1)
+  mean.model = list(armaOrder = c(3, 1), include.mean = TRUE, archm = FALSE, arfima = TRUE),  # FARIMA(3,d,1)
+  distribution.model = "norm"  # Distribution normale
+)
+
+# Ajuster le modèle sur les données
+best_model <- ugarchfit(spec = spec, data = na.omit(Rend))
+
+# Résultats de l'ajustement
+best_model
+```
+
+```{r}
+volatility <- sigma(best_model)
+
+# Tracer la volatilité
+plot(volatility, type = "l", col = "blue", main = "Volatilité Conditionnelle (GARCH)", ylab = "Volatilité")
+lines(Rend, col = "gray")
+```
+
+```{r}
+volatility <- c(NA, volatility)
+combined_df$Sigma <- volatility
+```
+
+```{r}
+## Pour le carré du rendement (Attention ça dure)
+results2 <- grid_search(data = Rend**2, max_pq_farima = 3, max_pq_garch = 3)
+```
+
+```{r}
+# Définir la spécification du modèle ARFIMA + GARCH
+spec <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(2, 3)),  # GARCH(2,3)
+  mean.model = list(armaOrder = c(3, 1), include.mean = TRUE, archm = FALSE, arfima = TRUE),  # FARIMA(3,d,2)
+  distribution.model = "norm"  # Distribution normale
+)
+
+# Ajuster le modèle sur les données
+best_model_sq <- ugarchfit(spec = spec, data = Rend**2)
+
+# Résultats de l'ajustement
+best_model_sq
+```
+
+```{r}
+volatility_sq <- sigma(best_model_sq)
+
+# Tracer la volatilité
+plot(volatility_sq, type = "l", col = "blue", main = "Volatilité Conditionnelle (GARCH)", ylab = "Volatilité")
+lines(Rend, col = "gray")
+```
+
+```{r}
+volatility_sq <- c(NA, volatility_sq)
+combined_df$Sigma2 <- volatility_sq
+```
+
+```{r}
+# Sélectionner les colonnes désirées
+data_to_export <- combined_df[, c("Date", "Sigma2", "Sigma")]
+
+# Exporter le dataframe dans un fichier CSV
+write.csv(data_to_export, "volatilite_estimee.csv", row.names = FALSE)
+
+```
